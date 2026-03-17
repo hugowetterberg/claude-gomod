@@ -15,7 +15,8 @@ golangci-lint run ./... # Lint (strict config in .golangci.yml)
 Single-package (`main`) MCP server using `github.com/modelcontextprotocol/go-sdk`.
 
 - `main.go` — Entry point, discovers GOMODCACHE, wires dependencies
-- `tools.go` — MCP tool registration and handlers (`gomod_list_versions`, `gomod_read_mod`, `gomod_list_files`, `gomod_read_file`)
+- `tools.go` — MCP tool registration and handlers (`gomod_list_versions`, `gomod_read_mod`, `gomod_list_files`, `gomod_read_file`, `gomod_search_files`)
+- `search.go` — Regexp search helpers (`fileMatches`, `searchContent`)
 - `proxy.go` — HTTP client for proxy.golang.org (`ProxyClient`, `encodePath`)
 - `cache.go` — In-memory zip archive cache (`ZipCache`, `ZipEntry`)
 - `modcache.go` — Local Go module cache reader (`ModCache`, reads from `$GOMODCACHE`)

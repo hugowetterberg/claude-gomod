@@ -10,6 +10,7 @@ An MCP server that gives Claude access to Go module source code from [proxy.gola
 | `gomod_read_mod` | Read a module's go.mod file |
 | `gomod_list_files` | List files in a module's source archive |
 | `gomod_read_file` | Read a source file from a module's archive |
+| `gomod_search_files` | Search file contents using a regular expression |
 
 All tools accept `"latest"` as the version, which is resolved via the proxy's `/@latest` endpoint.
 
@@ -63,6 +64,23 @@ Once registered, Claude can use the tools directly:
 - "Show me the go.mod of golang.org/x/net@latest"
 - "List files in github.com/modelcontextprotocol/go-sdk v1.1.0"
 - "Read server.go from github.com/modelcontextprotocol/go-sdk v1.1.0"
+- "Search for 'HandleCall' in github.com/modelcontextprotocol/go-sdk v1.1.0"
+
+## Search
+
+`gomod_search_files` performs a regexp search across all files in a module's source archive, returning matching lines with optional context. Binary files are skipped automatically.
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `module` | yes | Go module path |
+| `version` | yes | Module version or `"latest"` |
+| `pattern` | yes | Regular expression to search for |
+| `lines_before` | no | Number of context lines before each match (default 0) |
+| `lines_after` | no | Number of context lines after each match (default 0) |
+| `extensions` | no | File extensions to include, e.g. `[".go", ".mod"]` |
+| `glob` | no | Glob pattern to filter file paths (`path.Match` syntax) |
+
+Results are capped at 100 files and 1000 total matches, with a truncation notice when limits are hit.
 
 ## Flags
 

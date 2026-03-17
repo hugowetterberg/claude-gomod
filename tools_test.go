@@ -417,31 +417,8 @@ func TestToolsZipCaching(t *testing.T) {
 	}
 }
 
-func TestToolsListReturnsAllFourTools(t *testing.T) {
-	env := setupTestEnv(t, fakeProxy(nil))
-	defer env.close()
-
-	result, err := env.session.ListTools(context.Background(), nil)
-
-	mustf(t, err, "list tools")
-
-	names := make(map[string]bool)
-
-	for _, tool := range result.Tools {
-		names[tool.Name] = true
-	}
-
-	for _, want := range []string{
-		"gomod_list_versions",
-		"gomod_read_mod",
-		"gomod_list_files",
-		"gomod_read_file",
-	} {
-		if !names[want] {
-			t.Errorf("missing tool %q in tools/list response", want)
-		}
-	}
-}
+// TestToolsListReturnsAllFourTools moved to search_test.go as
+// TestToolsListReturnsFiveTools after adding gomod_search_files.
 
 // createTestZipWithBinary creates a zip containing a single binary file.
 func createTestZipWithBinary(t *testing.T, prefix, name string, data []byte) []byte {

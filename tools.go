@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+const (
+	maxSearchFiles   = 100
+	maxSearchMatches = 1000
 )
 
 type listVersionsInput struct {
@@ -29,6 +35,16 @@ type readFileInput struct {
 	Module  string `json:"module" jsonschema:"Go module path"`
 	Version string `json:"version" jsonschema:"Module version or 'latest'"`
 	Path    string `json:"path" jsonschema:"File path within the module"`
+}
+
+type searchFilesInput struct {
+	Module      string   `json:"module" jsonschema:"Go module path"`
+	Version     string   `json:"version" jsonschema:"Module version or 'latest'"`
+	Pattern     string   `json:"pattern" jsonschema:"Regular expression to search for"`
+	LinesBefore int      `json:"lines_before,omitempty" jsonschema:"Context lines before each match (default 0)"`
+	LinesAfter  int      `json:"lines_after,omitempty" jsonschema:"Context lines after each match (default 0)"`
+	Extensions  []string `json:"extensions,omitempty" jsonschema:"File extensions to include (e.g. .go and .mod)"`
+	Glob        string   `json:"glob,omitempty" jsonschema:"Glob pattern to filter file paths (path.Match syntax)"`
 }
 
 func registerTools(
@@ -75,6 +91,18 @@ func registerTools(
 		input readFileInput,
 	) (*mcp.CallToolResult, any, error) {
 		return handleReadFile(ctx, proxy, cache, modCache, input)
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "gomod_search_files",
+		Description: "Search file contents in a Go module using a regular expression. " +
+			"Returns matching lines with optional context. " +
+			"Binary files are skipped silently.",
+	}, func(
+		ctx context.Context, _ *mcp.CallToolRequest,
+		input searchFilesInput,
+	) (*mcp.CallToolResult, any, error) {
+		return handleSearchFiles(ctx, proxy, cache, modCache, input)
 	})
 }
 
@@ -208,6 +236,168 @@ func handleReadFile(
 	}
 
 	return textResult(content), nil, nil
+}
+
+func handleSearchFiles(
+	ctx context.Context, proxy *ProxyClient, cache *ZipCache,
+	modCache *ModCache, input searchFilesInput,
+) (*mcp.CallToolResult, any, error) {
+	re, err := regexp.Compile(input.Pattern)
+	if err != nil {
+		return errorResult(
+			fmt.Sprintf("invalid regexp %q: %v", input.Pattern, err),
+		), nil, nil
+	}
+
+	version, err := resolveVersion(ctx, proxy, input.Module, input.Version)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	files, readFile, err := listAndReader(
+		ctx, proxy, cache, modCache, input.Module, version,
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sort.Strings(files)
+
+	var (
+		results      []searchFileResult
+		totalMatches int
+		truncated    int
+	)
+
+	for _, f := range files {
+		if !fileMatches(f, input.Extensions, input.Glob) {
+			continue
+		}
+
+		content, err := readFile(f)
+		if err != nil {
+			// Skip binary or unreadable files.
+			continue
+		}
+
+		matches := searchContent(re, content, input.LinesBefore, input.LinesAfter)
+		if len(matches) == 0 {
+			continue
+		}
+
+		if len(results) >= maxSearchFiles {
+			truncated += len(matches)
+
+			continue
+		}
+
+		remaining := maxSearchMatches - totalMatches
+		if len(matches) > remaining {
+			truncated += len(matches) - remaining
+			matches = matches[:remaining]
+		}
+
+		results = append(results, searchFileResult{
+			Path:    f,
+			Matches: matches,
+		})
+
+		totalMatches += len(matches)
+
+		if totalMatches >= maxSearchMatches {
+			break
+		}
+	}
+
+	return textResult(
+		formatSearchResults(input.Module, version, input.Pattern, results, truncated),
+	), nil, nil
+}
+
+// listAndReader returns the file list and a read function for a
+// module, using the mod cache when available and falling back to the
+// proxy zip.
+func listAndReader(
+	ctx context.Context, proxy *ProxyClient, cache *ZipCache,
+	modCache *ModCache, module, version string,
+) ([]string, func(string) (string, error), error) {
+	if modCache.HasModule(module, version) {
+		files, err := modCache.ListFiles(module, version, "")
+		if err != nil {
+			return nil, nil, err
+		}
+
+		readFn := func(p string) (string, error) {
+			return modCache.ReadFile(module, version, p)
+		}
+
+		return files, readFn, nil
+	}
+
+	entry, err := getOrDownload(ctx, proxy, cache, module, version)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return entry.ListFiles(""), entry.ReadFile, nil
+}
+
+func formatSearchResults(
+	module, version, pattern string,
+	results []searchFileResult, truncated int,
+) string {
+	var sb strings.Builder
+
+	totalMatches := 0
+
+	for _, r := range results {
+		totalMatches += len(r.Matches)
+	}
+
+	fmt.Fprintf(
+		&sb,
+		"Search results for /%s/ in %s@%s (%d matches in %d files):\n",
+		pattern, module, version, totalMatches, len(results),
+	)
+
+	for _, r := range results {
+		fmt.Fprintf(&sb, "\n--- %s ---\n", r.Path)
+
+		for i, m := range r.Matches {
+			if i > 0 {
+				// Separator between non-contiguous matches in the
+				// same file.
+				prevEnd := r.Matches[i-1].LineNum + len(r.Matches[i-1].After)
+				thisStart := m.LineNum - len(m.Before)
+
+				if thisStart > prevEnd {
+					sb.WriteString("--\n")
+				}
+			}
+
+			beforeStart := m.LineNum - len(m.Before)
+
+			for j, line := range m.Before {
+				fmt.Fprintf(&sb, "%d- %s\n", beforeStart+j, line)
+			}
+
+			fmt.Fprintf(&sb, "%d: %s\n", m.LineNum, m.Line)
+
+			for j, line := range m.After {
+				fmt.Fprintf(&sb, "%d- %s\n", m.LineNum+1+j, line)
+			}
+		}
+	}
+
+	if truncated > 0 {
+		fmt.Fprintf(
+			&sb,
+			"\n(results truncated, %d additional matches not shown)\n",
+			truncated,
+		)
+	}
+
+	return sb.String()
 }
 
 func resolveVersion(
